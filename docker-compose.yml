@@ -2,8 +2,8 @@ services:
   streammonitor:
     build: ./
     restart: always
-    environment:
-      - STREAMS=station-a=https://icecast.example.com/station-a,station-b=https://icecast.example.com/station-b
+    volumes:
+      - ./streams.yml:/app/config/streams.yml:ro
     ports:
       - 8000:8000
 

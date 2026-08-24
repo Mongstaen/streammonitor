@@ -3,26 +3,33 @@ net = require "net"
 express = require "express"
 http = require "http"
 child_process = require "child_process"
+fs = require "fs"
+yaml = require "js-yaml"
 
 # Retrieve config from environment
 httpPort = process.env.HTTP_PORT or 8000
 checkInterval = process.env.CHECK_INTERVAL or 1000
 silenceThreshold = process.env.SILENCE_THRESHOLD or -20
 
-streamsEnv = process.env.STREAMS
-unless streamsEnv
-  console.log "Error: STREAMS must be set in environment (comma-separated name=url pairs)"
+configPath = process.env.STREAMS_CONFIG or "/app/config/streams.yml"
+
+unless fs.existsSync configPath
+  console.log "Error: streams config file not found: %s (set STREAMS_CONFIG to override)", configPath
   process.exit()
 
-# Parse "name=url,name=url,..." into [{name, url}, ...]
-streams = for pair in streamsEnv.split(",")
-  [name, urlParts...] = pair.trim().split("=")
-  name: name?.trim()
-  url: urlParts.join("=").trim()
+config = yaml.load fs.readFileSync configPath, "utf8"
+
+unless config?.streams?.length
+  console.log "Error: %s must define a non-empty top-level 'streams' list", configPath
+  process.exit()
+
+streams = for s in config.streams
+  name: s.name
+  url: s.url
 
 for s in streams
   unless s.name and s.url
-    console.log "Error: invalid STREAMS entry (expected name=url): %s", JSON.stringify(s)
+    console.log "Error: invalid entry in %s (expected {name, url}): %s", configPath, JSON.stringify(s)
     process.exit()
 
 # Convert silenceThreshold to absolute 16-bit value

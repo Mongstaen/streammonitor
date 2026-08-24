@@ -5,7 +5,8 @@
   "main": "app.coffee",
   "dependencies": {
     "coffeescript": "^1.9.3",
-    "express": "^4.12.4"
+    "express": "^4.12.4",
+    "js-yaml": "^4.1.0"
   },
   "scripts": {
     "test": "exit 0"

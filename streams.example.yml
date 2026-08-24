@@ -1,0 +1,5 @@
+streams:
+  - name: station-a
+    url: https://icecast.example.com/station-a
+  - name: station-b
+    url: https://icecast.example.com/station-b

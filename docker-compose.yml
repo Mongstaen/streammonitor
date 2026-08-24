@@ -3,7 +3,7 @@ services:
     build: ./
     restart: always
     volumes:
-      - ./streams.yml:/app/config/streams.yml:ro
+      - ./config:/app/config
     ports:
       - 8000:8000
 
@@ -12,8 +12,12 @@ services:
     restart: always
     environment:
       - STATUS_URL=http://streammonitor:8000/
-      - NTFY_URL=https://ntfy.sh/streammonitor-alerts
+      # NTFY_URL / WEBHOOK_URL here are just bootstrap defaults - whatever
+      # you save in the dashboard's Notifications panel takes precedence.
+      # - NTFY_URL=https://ntfy.sh/your-unguessable-topic-name
+      # - WEBHOOK_URL=https://example.com/hook
     volumes:
+      - ./config:/app/config:ro
       - streammonitor_monitor_state:/var/lib/streammonitor-monitor
     depends_on:
       - streammonitor

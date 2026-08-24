@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Poll a streammonitor-central JSON status endpoint (array of streams) and
-push ntfy alerts per-stream on state change.
+push ntfy/webhook alerts per-stream on state change.
 
 Meant to run in a loop every minute. Only notifies on ok->bad and bad->ok
 transitions per stream (state tracked in one file per stream), not on every
 poll.
 
-Usage: monitor_ntfy.py <status_url> <ntfy_topic_url> [state_dir]
+Config is read entirely from the environment (see entrypoint.sh): STATUS_URL
+(required), STATE_DIR, NTFY_URL, WEBHOOK_URL, NOTIFY_CONFIG. NTFY_URL and
+WEBHOOK_URL are bootstrap defaults; if NOTIFY_CONFIG (a JSON file shared with
+streammonitor's dashboard, e.g. {"ntfyUrl": "...", "webhookUrl": "..."})
+exists and sets a value, that overrides the env var default.
 """
 
 import json
@@ -15,6 +19,7 @@ import os
 import re
 import sys
 import urllib.request
+from datetime import datetime, timezone
 
 SILENCE_THRESHOLD_S = 10
 SILENCE_ERROR_THRESHOLD_S = 60
@@ -70,24 +75,52 @@ def send_ntfy(ntfy_url: str, title: str, message: str, priority: str, tags: str)
     urllib.request.urlopen(req, timeout=10)
 
 
+def send_webhook(webhook_url: str, payload: dict) -> None:
+    req = urllib.request.Request(
+        webhook_url,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    urllib.request.urlopen(req, timeout=10)
+
+
+def load_notify_overrides(path: str) -> dict:
+    """Reads {"ntfyUrl": ..., "webhookUrl": ...} written by the dashboard.
+
+    Missing file or bad JSON just means "no overrides yet" - not an error.
+    """
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def state_file_for(state_dir: str, name: str) -> str:
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
     return os.path.join(state_dir, f"{safe_name}.state")
 
 
 def main() -> int:
-    if len(sys.argv) not in (3, 4):
-        logger.error("usage: monitor_ntfy.py <status_url> <ntfy_topic_url> [state_dir]")
+    status_url = os.environ.get("STATUS_URL")
+    if not status_url:
+        logger.error("STATUS_URL env var required")
         return 1
 
-    status_url, ntfy_url = sys.argv[1], sys.argv[2]
-    state_dir = sys.argv[3] if len(sys.argv) == 4 else "/var/lib/streammonitor-monitor"
+    state_dir = os.environ.get("STATE_DIR") or "/var/lib/streammonitor-monitor"
+    notify_config_path = os.environ.get("NOTIFY_CONFIG") or "/app/config/notify.json"
 
     try:
         entries = fetch_all(status_url)
     except Exception as exc:
         logger.error("Can't reach streammonitor-central: %s", exc)
         return 1
+
+    overrides = load_notify_overrides(notify_config_path)
+    ntfy_url = overrides.get("ntfyUrl") or os.environ.get("NTFY_URL") or None
+    webhook_url = overrides.get("webhookUrl") or os.environ.get("WEBHOOK_URL") or None
 
     os.makedirs(state_dir, exist_ok=True)
     had_failure = False
@@ -108,13 +141,26 @@ def main() -> int:
             continue
 
         logger.info("[%s] state changed: %s -> %s", name, last_state, state)
+        recovered = state == "ok"
         try:
-            if state == "ok":
-                send_ntfy(ntfy_url, f"Streammonitor {name}: recovered", message, "default", "white_check_mark")
-            else:
-                send_ntfy(ntfy_url, f"Streammonitor {name}: ALERT", message, "urgent", "rotating_light")
+            if ntfy_url:
+                if recovered:
+                    send_ntfy(ntfy_url, f"Streammonitor {name}: recovered", message, "default", "white_check_mark")
+                else:
+                    send_ntfy(ntfy_url, f"Streammonitor {name}: ALERT", message, "urgent", "rotating_light")
+            if webhook_url:
+                send_webhook(webhook_url, {
+                    "name": name,
+                    "event": "recovered" if recovered else "alert",
+                    "state": state,
+                    "message": message,
+                    "text": message,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            if not ntfy_url and not webhook_url:
+                logger.warning("[%s] state changed but no ntfy/webhook URL configured, alert not sent", name)
         except Exception:
-            logger.exception("[%s] Failed to send ntfy notification", name)
+            logger.exception("[%s] Failed to send notification", name)
             had_failure = True
             continue
 

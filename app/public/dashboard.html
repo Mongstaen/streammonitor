@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>streammonitor</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #14171c;
+    --panel: #1c2028;
+    --border: #2a2f3a;
+    --text: #e6e9ef;
+    --muted: #8b93a3;
+    --ok: #3ecf6a;
+    --warn: #e0a72e;
+    --bad: #e0503e;
+    --accent: #5b8def;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 2rem 1.5rem 4rem;
+  }
+  main { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+  .sub { color: var(--muted); font-size: 0.85rem; margin: 0 0 2rem; }
+  .sub a { color: var(--accent); }
+  h2 { font-size: 1.05rem; margin: 0 0 1rem; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2.5rem;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.1rem;
+  }
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+  }
+  .card-head .name { font-weight: 600; }
+  .badge {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    text-transform: uppercase;
+  }
+  .badge.ok { background: rgba(62, 207, 106, 0.15); color: var(--ok); }
+  .badge.silence { background: rgba(224, 167, 46, 0.15); color: var(--warn); }
+  .badge.offline { background: rgba(224, 80, 62, 0.15); color: var(--bad); }
+  .card .url {
+    color: var(--muted);
+    font-size: 0.78rem;
+    word-break: break-all;
+    margin-bottom: 0.6rem;
+  }
+  .card .detail { font-size: 0.85rem; color: var(--text); }
+  .empty { color: var(--muted); }
+
+  section.settings {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem 1.4rem 1.5rem;
+  }
+  .hint { color: var(--muted); font-size: 0.85rem; margin: 0 0 1.1rem; }
+  label {
+    display: block;
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-bottom: 1rem;
+  }
+  label span { display: block; margin-bottom: 0.35rem; color: var(--text); }
+  input[type="url"] {
+    width: 100%;
+    padding: 0.55rem 0.65rem;
+    background: #10131a;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 0.9rem;
+  }
+  input[type="url"]:focus { outline: none; border-color: var(--accent); }
+  .actions { display: flex; gap: 0.6rem; margin-top: 0.4rem; }
+  button {
+    background: var(--accent);
+    color: #0c1524;
+    border: none;
+    border-radius: 6px;
+    padding: 0.55rem 1rem;
+    font-weight: 600;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .status-msg { margin-top: 0.8rem; font-size: 0.85rem; min-height: 1.2em; }
+  .status-msg.ok { color: var(--ok); }
+  .status-msg.err { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <h1>streammonitor</h1>
+  <p class="sub">Auto-refreshing every 3s &middot; <a href="/">raw JSON</a></p>
+
+  <div id="grid" class="grid"><p class="empty">Loading stream status&hellip;</p></div>
+
+  <section class="settings">
+    <h2>Notifications</h2>
+    <p class="hint">
+      Alerts fire when a stream goes silent or offline, and again on recovery.
+      Leave a field blank and Save to disable that channel. Changes apply on
+      the monitor's next poll (see <code>POLL_INTERVAL</code>).
+    </p>
+    <label>
+      <span>ntfy topic URL</span>
+      <input id="ntfyUrl" type="url" placeholder="https://ntfy.sh/your-unguessable-topic-name">
+    </label>
+    <label>
+      <span>Webhook URL</span>
+      <input id="webhookUrl" type="url" placeholder="https://example.com/hook (JSON body, Slack/Discord/Mattermost-style)">
+    </label>
+    <div class="actions">
+      <button id="saveBtn">Save</button>
+      <button id="testBtn" class="secondary">Save &amp; send test</button>
+    </div>
+    <p id="settingsStatus" class="status-msg"></p>
+  </section>
+</main>
+
+<script>
+  const SILENCE_THRESHOLD_S = 10;
+  const OFFLINE_THRESHOLD_S = 10;
+
+  function formatDuration(seconds) {
+    seconds = Math.max(0, Math.floor(seconds || 0));
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    if (h) return `${h}h ${m}m`;
+    if (m) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  function classify(entry) {
+    if (entry.status === "ERROR" && entry.offlineDuration > OFFLINE_THRESHOLD_S) {
+      return { cls: "offline", label: "offline", detail: `offline for ${formatDuration(entry.offlineDuration)}` };
+    }
+    if (entry.silenceDuration > SILENCE_THRESHOLD_S) {
+      return { cls: "silence", label: "silence", detail: `silent for ${formatDuration(entry.silenceDuration)}` };
+    }
+    return { cls: "ok", label: "ok", detail: `online for ${formatDuration(entry.onlineDuration)}` };
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  async function refreshStatus() {
+    const grid = document.getElementById("grid");
+    try {
+      const res = await fetch("/");
+      const entries = await res.json();
+      if (!entries.length) {
+        grid.innerHTML = '<p class="empty">No streams configured.</p>';
+        return;
+      }
+      grid.innerHTML = entries.map((entry) => {
+        const c = classify(entry);
+        return `
+          <div class="card">
+            <div class="card-head">
+              <span class="name">${escapeHtml(entry.name)}</span>
+              <span class="badge ${c.cls}">${c.label}</span>
+            </div>
+            <div class="url">${escapeHtml(entry.url)}</div>
+            <div class="detail">${escapeHtml(c.detail)}</div>
+          </div>
+        `;
+      }).join("");
+    } catch (err) {
+      grid.innerHTML = `<p class="empty">Can't reach status API: ${escapeHtml(err.message)}</p>`;
+    }
+  }
+
+  async function loadSettings() {
+    try {
+      const res = await fetch("/api/settings");
+      const settings = await res.json();
+      document.getElementById("ntfyUrl").value = settings.ntfyUrl || "";
+      document.getElementById("webhookUrl").value = settings.webhookUrl || "";
+    } catch (err) {
+      setStatus(`Failed to load settings: ${err.message}`, true);
+    }
+  }
+
+  function setStatus(msg, isErr) {
+    const el = document.getElementById("settingsStatus");
+    el.textContent = msg;
+    el.className = "status-msg " + (isErr ? "err" : "ok");
+  }
+
+  async function saveSettings() {
+    const body = {
+      ntfyUrl: document.getElementById("ntfyUrl").value.trim(),
+      webhookUrl: document.getElementById("webhookUrl").value.trim(),
+    };
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "save failed");
+    return data;
+  }
+
+  document.getElementById("saveBtn").addEventListener("click", async () => {
+    try {
+      await saveSettings();
+      setStatus("Saved.", false);
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  });
+
+  document.getElementById("testBtn").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      await saveSettings();
+      const res = await fetch("/api/settings/test", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "test failed");
+      const parts = Object.entries(data).map(([k, v]) =>
+        v.ok ? `${k}: sent` : `${k}: failed (${v.error || v.statusCode})`
+      );
+      const anyFailed = Object.values(data).some((v) => !v.ok);
+      setStatus(parts.join(", "), anyFailed);
+    } catch (err) {
+      setStatus(err.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  loadSettings();
+  refreshStatus();
+  setInterval(refreshStatus, 3000);
+</script>
+</body>
+</html>

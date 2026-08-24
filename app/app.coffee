@@ -2,6 +2,8 @@ require "coffeescript"
 net = require "net"
 express = require "express"
 http = require "http"
+https = require "https"
+path = require "path"
 child_process = require "child_process"
 fs = require "fs"
 yaml = require "js-yaml"
@@ -12,6 +14,7 @@ checkInterval = process.env.CHECK_INTERVAL or 1000
 silenceThreshold = process.env.SILENCE_THRESHOLD or -20
 
 configPath = process.env.STREAMS_CONFIG or "/app/config/streams.yml"
+notifyConfigPath = process.env.NOTIFY_CONFIG or "/app/config/notify.json"
 
 unless fs.existsSync configPath
   console.log "Error: streams config file not found: %s (set STREAMS_CONFIG to override)", configPath
@@ -46,6 +49,19 @@ for s in streams
     pid: null
     child: null
 
+# Transition helpers - idempotent, so retrying a still-broken stream every
+# checkInterval doesn't keep resetting offlineSince back to "now" and
+# masking a real outage as ever-growing "silence" instead.
+markOnline = (state) ->
+  return if state.onlineSince
+  state.onlineSince = new Date()
+  state.offlineSince = null
+
+markOffline = (state) ->
+  return if state.offlineSince
+  state.offlineSince = new Date()
+  state.onlineSince = null
+
 # function that is periodically called to connect to a given stream
 checkChildProcess = (name) =>
   state = states[name]
@@ -59,17 +75,19 @@ checkChildProcess = (name) =>
 
   child.on "error", (err) ->
     console.log "[%s] Error starting process: %s", name, err
-    state.onlineSince = null
-    state.offlineSince = new Date()
+    markOffline state
     state.pid = 0
 
   child.on "exit", (code) ->
     console.log "[%s] Process exited with code %d", name, code
-    state.onlineSince = null
-    state.offlineSince = new Date()
+    markOffline state
     state.pid = 0
 
+  # Only counts as online once we've actually decoded audio, not just on
+  # spawning the pipeline - a bad URL can spawn curl/lame fine and then
+  # exit a moment later with nothing ever going through.
   child.stdout.on "data", (data) ->
+    markOnline state
     for i in [0..data.length/2-1]
       sample = Math.abs(data.readInt16LE i*2)
       if sample > silenceThresholdLinear
@@ -77,8 +95,6 @@ checkChildProcess = (name) =>
         break
 
   state.pid = child.pid
-  state.offlineSince = null
-  state.onlineSince = new Date()
 
   console.log "[%s] Process started, pid=%d", name, state.pid
 
@@ -104,13 +120,100 @@ getAllStatus = () ->
   (getStreamStatus(s.name) for s in streams)
 
 
+# Notification settings (ntfy/webhook URLs), shared with monitor-ntfy via
+# notifyConfigPath. Read fresh on every request since the dashboard's Save
+# button writes the file directly rather than going through this process.
+loadNotifySettings = ->
+  try
+    JSON.parse fs.readFileSync notifyConfigPath, "utf8"
+  catch
+    {}
+
+saveNotifySettings = (settings) ->
+  fs.mkdirSync path.dirname(notifyConfigPath), recursive: true
+  fs.writeFileSync notifyConfigPath, JSON.stringify(settings, null, 2)
+
+# POSTs body to targetUrl (http or https) and calls cb(err, statusCode)
+httpPost = (targetUrl, body, headers, cb) ->
+  parsed = new URL(targetUrl)
+  mod = if parsed.protocol == "https:" then https else http
+  req = mod.request targetUrl, {method: "POST", headers: headers}, (res) ->
+    res.resume()
+    cb null, res.statusCode
+  req.on "error", (err) -> cb err
+  req.end body
+
+sendNtfyTest = (ntfyUrl, cb) ->
+  httpPost ntfyUrl, "Test notification from the streammonitor dashboard", {
+    "Title": "streammonitor test"
+    "Priority": "default"
+    "Tags": "test_tube"
+    "Content-Type": "text/plain"
+  }, cb
+
+sendWebhookTest = (webhookUrl, cb) ->
+  payload = JSON.stringify
+    event: "test"
+    message: "Test notification from the streammonitor dashboard"
+    text: "Test notification from the streammonitor dashboard"
+    timestamp: new Date().toISOString()
+  httpPost webhookUrl, payload, {"Content-Type": "application/json"}, cb
+
+
 # Create web app
 app = express()
 app.set "json spaces", 2
+app.use express.json()
 
 # Root document returns an array with the status of every stream
 app.get "/", (req, res) ->
   res.jsonp getAllStatus()
+
+# Live dashboard UI
+app.get "/dashboard", (req, res) ->
+  res.sendFile path.join(__dirname, "public", "dashboard.html")
+
+# Current notification settings
+app.get "/api/settings", (req, res) ->
+  res.json loadNotifySettings()
+
+# Save notification settings. A missing/empty field clears that channel.
+app.post "/api/settings", (req, res) ->
+  body = req.body or {}
+  settings = {}
+  for key in ["ntfyUrl", "webhookUrl"]
+    value = body[key]
+    continue unless value
+    try
+      parsed = new URL(value)
+      throw new Error() unless parsed.protocol in ["http:", "https:"]
+    catch
+      return res.status(400).json error: "#{key} must be a valid http:// or https:// URL"
+    settings[key] = value
+  saveNotifySettings settings
+  res.json settings
+
+# Sends one test notification per configured channel, using saved settings
+app.post "/api/settings/test", (req, res) ->
+  settings = loadNotifySettings()
+  channels = []
+  channels.push ["ntfy", settings.ntfyUrl, sendNtfyTest] if settings.ntfyUrl
+  channels.push ["webhook", settings.webhookUrl, sendWebhookTest] if settings.webhookUrl
+
+  unless channels.length
+    return res.status(400).json error: "No notification channels configured yet"
+
+  results = {}
+  remaining = channels.length
+  for [key, targetUrl, sender] in channels
+    do (key, targetUrl, sender) ->
+      sender targetUrl, (err, statusCode) ->
+        results[key] = if err
+          {ok: false, error: err.message}
+        else
+          {ok: statusCode < 300, statusCode: statusCode}
+        remaining -= 1
+        res.json results if remaining == 0
 
 # Single stream's status, by name
 app.get "/:name", (req, res) ->

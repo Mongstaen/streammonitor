@@ -18,7 +18,8 @@ over HTTP so something else — a dashboard, `monitor-ntfy/` in this repo, a
 cron job — can poll it and act on the result.
 
 It does not send any notifications itself. If you want alerts, run
-`monitor-ntfy/` alongside it (see [Alerting](#alerting) below).
+`monitor-ntfy/` alongside it (see [Alerting](#alerting) below) — or just
+configure it from the [dashboard](#dashboard) once it's running.
 
 ## Quick start
 
@@ -28,10 +29,10 @@ Requires Docker and Docker Compose.
 2. Copy the example stream list and point it at your own streams:
 
    ```sh
-   cp streams.example.yml streams.yml
+   cp config/streams.example.yml config/streams.yml
    ```
 
-   Edit `streams.yml`, e.g.:
+   Edit `config/streams.yml`, e.g.:
 
    ```yaml
    streams:
@@ -41,41 +42,40 @@ Requires Docker and Docker Compose.
        url: https://icecast.example.com/station-b
    ```
 
-3. (Optional) If you want ntfy alerts, edit `NTFY_URL` in
-   `docker-compose.yml` — it defaults to a public `ntfy.sh` topic which
-   *anyone* can subscribe to or spam, so change the topic name to something
-   unguessable, or point it at a self-hosted ntfy server. See
-   [Alerting](#alerting).
-4. Start it:
+3. Start it:
 
    ```sh
    docker compose up -d --build
    ```
 
-5. Check it's working:
+4. Open `http://localhost:8000/dashboard` in a browser. You should see one
+   card per stream. A freshly started stream shows red ("offline") for the
+   first second or two until `curl`/`lame` connect — that's normal.
+5. (Optional) In the dashboard's **Notifications** panel, paste in an ntfy
+   topic URL and/or a webhook URL, click **Save & send test**, and confirm
+   you actually receive it (install the [ntfy app](https://ntfy.sh/) and
+   subscribe to your topic first). See [Alerting](#alerting) for details.
 
-   ```sh
-   curl http://localhost:8000/
-   ```
-
-   You should see one JSON status object per stream (see
-   [HTTP interface](#http-interface)). A freshly started stream reports
-   `"status": "ERROR"` for the first second or two until `curl`/`lame`
-   connect — that's normal.
-
-If you skip step 3, `monitor-ntfy` still starts but every alert goes to
-the public `ntfy.sh/streammonitor-alerts` topic from `docker-compose.yml`
-— fine for a quick test, not for real use.
+If you skip step 5, `monitor-ntfy` still starts but sends nothing until a
+channel is configured — streammonitor itself works fine either way,
+alerting is just inert until then.
 
 ## Configuration
 
-Set via `streams.yml` (see Quick start) plus these environment variables,
-settable in `docker-compose.yml`:
+Everything lives in `config/`, which both containers share as a mounted
+volume (`streammonitor` can write to it, `monitor-ntfy` only reads it):
+
+- `config/streams.yml` — the streams to monitor (see Quick start).
+- `config/notify.json` — ntfy/webhook settings, written by the dashboard's
+  Notifications panel. Not required to exist; alerting is just inert until
+  something's saved there.
+
+Plus these environment variables, settable in `docker-compose.yml`:
 
 - `STREAMS_CONFIG` (optional, default `/app/config/streams.yml`) — path
   *inside the container* to the YAML file listing the streams to monitor.
   You normally don't need to change this; `docker-compose.yml` already
-  mounts your `streams.yml` to that path. The format is:
+  mounts `config/` to `/app/config`. The format is:
 
   ```yaml
   streams:
@@ -121,41 +121,86 @@ settable in `docker-compose.yml`:
   ]
   ```
 
-  `status` is `"OK"` if the decoder process is currently running,
-  `"ERROR"` if it isn't (stream unreachable, connection dropped, etc.) —
-  it does *not* by itself mean silence; check `silenceDuration` for that.
+  `status` is `"OK"` once the stream has actually produced decoded audio
+  and stays that way while it keeps flowing; `"ERROR"` before that first
+  audio arrives or after the decoder process dies (stream unreachable,
+  connection dropped, URL doesn't serve audio, etc.) — it does *not* by
+  itself mean silence; check `silenceDuration` for that.
 - `GET /:name` — single stream's status object, 404 if `name` isn't
   configured.
 - `GET /:name/value/:key` — single field from one stream's status, as
   upstream's `/value/:key` did. E.g. `GET /station-a/value/silenceDuration`.
 
+## Dashboard
+
+`GET /dashboard` is a small self-contained web UI (no build step, no
+external assets) that:
+
+- Shows a live-refreshing (every 3s) card per stream, colored by the same
+  ok/silence/offline classification `monitor-ntfy` uses for alerts.
+- Has a **Notifications** panel to set an ntfy topic URL and/or a webhook
+  URL, with a **Save & send test** button that fires one real notification
+  immediately so you can confirm it actually arrives, rather than waiting
+  for a real stream failure.
+
+Settings are exposed as a small JSON API too, if you want to script it:
+
+- `GET /api/settings` — current `{ntfyUrl, webhookUrl}` (either key may be
+  absent).
+- `POST /api/settings` — body `{ntfyUrl, webhookUrl}`; omit or send an
+  empty string for a field to disable that channel. Values must be
+  `http://` or `https://` URLs. Overwrites `config/notify.json` in full
+  (not a merge).
+- `POST /api/settings/test` — sends one test notification through each
+  currently-saved channel; responds with per-channel `{ok, statusCode}` or
+  `{ok: false, error}`.
+
+This API has no authentication, same as the rest of streammonitor — see
+the security note under [Deploying](#deploying).
+
 ## Alerting
 
 `monitor-ntfy/` is a separate small container that polls `GET /` on the
-main monitor and pushes an [ntfy](https://ntfy.sh) push notification per
-stream when it transitions between OK and a bad state (offline or
-silence >10s), and again when it recovers. State is tracked per stream
-under `STATE_DIR` so a restart doesn't re-fire alerts for streams that
-were already broken.
+main monitor and, per stream, when it transitions between OK and a bad
+state (offline or silence >10s) — and again on recovery — pushes:
 
-To actually receive the alerts, install the [ntfy app](https://ntfy.sh/)
-(or use a browser) and subscribe to the topic name in your `NTFY_URL`.
-Anyone who knows the topic name can subscribe to it too, so treat it like
-a shared secret — don't use the default example topic for anything real.
+- an [ntfy](https://ntfy.sh) push notification, if an ntfy topic URL is
+  configured, and/or
+- a generic JSON webhook POST, if a webhook URL is configured. The body is
+  `{name, event, state, message, text, timestamp}` — `text` duplicates
+  `message` since that's the field Slack/Discord/Mattermost incoming
+  webhooks look for by default, so simple integrations need no extra
+  templating.
 
-Environment variables (set in `docker-compose.yml`):
+State is tracked per stream under `STATE_DIR` so a restart doesn't re-fire
+alerts for streams that were already broken.
+
+The easiest way to configure both is the [dashboard](#dashboard)'s
+Notifications panel — it writes `config/notify.json`, which `monitor-ntfy`
+picks up on its next poll (up to `POLL_INTERVAL` later). To actually
+receive ntfy alerts, install the [ntfy app](https://ntfy.sh/) (or use a
+browser) and subscribe to your topic. Anyone who knows an ntfy topic name
+can subscribe to it or publish to it, so treat the topic name like a
+shared secret — pick something unguessable, or self-host ntfy.
+
+Environment variables (set in `docker-compose.yml`) act only as bootstrap
+defaults — whatever's saved in `config/notify.json` via the dashboard
+always takes precedence over these:
 
 - `STATUS_URL` (required) — URL of the main streammonitor's `GET /`
   endpoint, e.g. `http://streammonitor:8000/` when both run under the same
   Compose project.
-- `NTFY_URL` (required) — full ntfy topic URL to POST alerts to, e.g.
-  `https://ntfy.sh/your-unguessable-topic-name`.
+- `NTFY_URL` (optional) — full ntfy topic URL to POST alerts to.
+- `WEBHOOK_URL` (optional) — full webhook URL to POST alerts to.
 - `STATE_DIR` (optional, default `/var/lib/streammonitor-monitor`) —
   where per-stream last-known-state files are kept. Should be a persistent
   volume (already set up in `docker-compose.yml`) so restarts don't
   re-notify for streams that were already down.
 - `POLL_INTERVAL` (optional, default `60` seconds) — how often to poll the
   main monitor.
+
+If neither an ntfy topic nor a webhook is configured anywhere, state
+changes are still logged but nothing is sent.
 
 ## Deploying
 
@@ -167,13 +212,18 @@ docker compose up -d --build
 
 Things you'll likely want to change for a real deployment:
 
-- `streams.yml` — your actual stations (see Quick start).
-- `NTFY_URL` — your own topic or self-hosted ntfy server.
+- `config/streams.yml` — your actual stations (see Quick start).
+- Notification settings — set from the [dashboard](#dashboard) rather than
+  the compose file, once it's running.
 - `ports` — which host port the status API is exposed on, if 8000
   conflicts with something else.
 - Put something in front of port 8000 (reverse proxy, firewall rule) if
-  the host is reachable from the internet — the status API has no
-  authentication.
+  the host is reachable from the internet — the status API, dashboard, and
+  `/api/settings` all have no authentication. Anyone who can reach port
+  8000 can read your stream URLs and repoint your notification webhook,
+  which could be used to spam an arbitrary internal or external URL
+  (SSRF-adjacent) — don't expose this port publicly without a proxy that
+  adds auth.
 
 ## License
 

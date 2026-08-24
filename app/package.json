@@ -1,0 +1,14 @@
+{
+  "name": "streammonitor",
+  "version": "0.1.0",
+  "description": "A monitor/silence detector for multiple Icecast/Shoutcast streams at once, returning an array of statuses",
+  "main": "app.coffee",
+  "dependencies": {
+    "coffeescript": "^1.9.3",
+    "express": "^4.12.4"
+  },
+  "scripts": {
+    "test": "exit 0"
+  },
+  "license": "AGPL-3.0"
+}

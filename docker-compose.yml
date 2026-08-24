@@ -1,0 +1,22 @@
+services:
+  streammonitor:
+    build: ./
+    restart: always
+    environment:
+      - STREAMS=station-a=https://icecast.example.com/station-a,station-b=https://icecast.example.com/station-b
+    ports:
+      - 8000:8000
+
+  streammonitor-monitor:
+    build: ./monitor-ntfy
+    restart: always
+    environment:
+      - STATUS_URL=http://streammonitor:8000/
+      - NTFY_URL=https://ntfy.sh/streammonitor-alerts
+    volumes:
+      - streammonitor_monitor_state:/var/lib/streammonitor-monitor
+    depends_on:
+      - streammonitor
+
+volumes:
+  streammonitor_monitor_state:

@@ -8,6 +8,8 @@ than deployed per client.
 
 Licensed AGPL-3.0, same as upstream — see [LICENSE](LICENSE).
 
+<img width="2004" height="1318" alt="CleanShot 2026-08-24 at 08 37 03@2x" src="https://github.com/user-attachments/assets/6588a5ad-c490-4aab-887a-68ae5a55bc6b" />
+
 ## How it works
 
 For each configured stream, streammonitor spawns `curl <url> | lame

@@ -145,6 +145,14 @@ saveNotifySettings = (settings) ->
 # blocks clients with no User-Agent, so this isn't cosmetic.
 USER_AGENT = "streammonitor/0.1"
 
+# True for a usable http(s) URL. Anything else - a bare hostname, a mailto:,
+# a typo - is rejected.
+isHttpUrl = (value) ->
+  try
+    new URL(value).protocol in ["http:", "https:"]
+  catch
+    false
+
 # POSTs body to targetUrl (http or https) and calls
 # cb(err, statusCode, responseBody). The response body is kept so a rejected
 # API call (a bad Resend key, say) can report why rather than just "400".
@@ -386,18 +394,26 @@ app.get "/api/settings", (req, res) ->
 # Save notification settings. Overwrites notify.json in full: a blank field
 # is left to whatever the environment supplies (email secrets excepted - see
 # below), and email is switched off unless a provider is picked.
+#
+# A field the server refuses doesn't take the rest of the file down with it:
+# everything that validated is written, the rejected field keeps whatever was
+# already saved, and the response lists what was turned away. Otherwise a
+# half-filled email panel would silently discard a perfectly good ntfy URL
+# typed in next to it.
 app.post "/api/settings", (req, res) ->
   body = req.body or {}
+  saved = loadNotifySettings()
   settings = {}
+  problems = []
+
   for key in ["ntfyUrl", "webhookUrl"]
     value = body[key]
     continue unless value
-    try
-      parsed = new URL(value)
-      throw new Error() unless parsed.protocol in ["http:", "https:"]
-    catch
-      return res.status(400).json error: "#{key} must be a valid http:// or https:// URL"
-    settings[key] = value
+    if isHttpUrl value
+      settings[key] = value
+    else
+      problems.push "#{key} must be a valid http:// or https:// URL"
+      settings[key] = saved[key] if saved[key]
 
   # Email is off unless a provider is picked, and switching it off drops the
   # stored credentials with it - that's the way to get a secret back out of
@@ -409,7 +425,7 @@ app.post "/api/settings", (req, res) ->
     # otherwise leaving email out of the file already means off.
     settings.email = {provider: "off"} if emailEnvDefaults().provider
   else
-    savedEmail = (loadNotifySettings().email or {})
+    savedEmail = saved.email or {}
     email = {provider: provider}
     for key in EMAIL_FIELDS when key != "provider"
       value = emailBody[key]
@@ -425,10 +441,17 @@ app.post "/api/settings", (req, res) ->
       continue if value is undefined or value == null or value == ""
       email[key] = if typeof value == "boolean" then value else String(value).trim()
     problem = validateEmail effectiveEmail(email)
-    return res.status(400).json error: problem if problem
-    settings.email = email
+    if problem
+      # Hold on to the last email config that worked rather than storing a
+      # broken one, but let the other channels through.
+      problems.push problem
+      settings.email = saved.email if saved.email
+    else
+      settings.email = email
 
   saveNotifySettings settings
+  if problems.length
+    return res.status(400).json error: problems.join("; "), settings: publicSettings()
   res.json publicSettings()
 
 # Sends one test notification per configured channel, using saved settings

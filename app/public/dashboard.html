@@ -382,17 +382,20 @@
       body: JSON.stringify(body),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "save failed");
-    return data;
+    // The server stores whatever validated even when it refuses part of the
+    // panel, so a rejection is a message to show, not a lost save.
+    return res.ok ? null : data.error || "save failed";
   }
 
   el("emailProvider").addEventListener("change", syncEmailFields);
 
   el("saveBtn").addEventListener("click", async () => {
     try {
-      await saveSettings();
-      setStatus("Saved.", false);
-      await loadSettings();
+      const problem = await saveSettings();
+      setStatus(problem || "Saved.", !!problem);
+      // Only pull the stored values back on a clean save - after a rejection
+      // the fields still hold what the user needs to correct.
+      if (!problem) await loadSettings();
     } catch (err) {
       setStatus(err.message, true);
     }
@@ -402,16 +405,20 @@
     const btn = e.currentTarget;
     btn.disabled = true;
     try {
-      await saveSettings();
+      // A refused field no longer aborts the test - the channels that did
+      // save are still worth exercising, and both messages get reported.
+      const problem = await saveSettings();
       const res = await fetch("/api/settings/test", { method: "POST" });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "test failed");
-      const parts = Object.entries(data).map(([k, v]) =>
-        v.ok ? `${k}: sent` : `${k}: failed (${v.error || v.statusCode})`
-      );
-      const anyFailed = Object.values(data).some((v) => !v.ok);
-      setStatus(parts.join(", "), anyFailed);
-      await loadSettings();
+      const parts = res.ok
+        ? Object.entries(data).map(([k, v]) =>
+            v.ok ? `${k}: sent` : `${k}: failed (${v.error || v.statusCode})`
+          )
+        : [data.error || "test failed"];
+      const anyFailed =
+        !res.ok || Object.values(data).some((v) => !v.ok);
+      setStatus([problem, parts.join(", ")].filter(Boolean).join(". "), anyFailed || !!problem);
+      if (!problem) await loadSettings();
     } catch (err) {
       setStatus(err.message, true);
     } finally {

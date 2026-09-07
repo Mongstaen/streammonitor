@@ -1,3 +1,5 @@
 node_modules/
 config/streams.yml
 config/notify.json
+.env
+__pycache__/

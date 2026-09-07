@@ -1,7 +1,28 @@
+# Notification credentials come from the environment. Docker Compose reads a
+# .env file next to this one automatically, so `cp .env.example .env` and edit
+# that rather than putting secrets in here (see .env.example). Everything here
+# is a bootstrap default - whatever you save in the dashboard's Notifications
+# panel wins over it, field by field.
+x-notify-env: &notify-env
+  NTFY_URL: ${NTFY_URL:-}
+  WEBHOOK_URL: ${WEBHOOK_URL:-}
+  EMAIL_PROVIDER: ${EMAIL_PROVIDER:-}
+  EMAIL_FROM: ${EMAIL_FROM:-}
+  EMAIL_TO: ${EMAIL_TO:-}
+  RESEND_API_KEY: ${RESEND_API_KEY:-}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-}
+  SMTP_SECURE: ${SMTP_SECURE:-}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASS: ${SMTP_PASS:-}
+
 services:
   streammonitor:
     build: ./
     restart: always
+    # The dashboard's "Save & send test" button sends through these same
+    # channels, so it needs the credentials too.
+    environment: *notify-env
     volumes:
       - ./config:/app/config
     ports:
@@ -11,11 +32,8 @@ services:
     build: ./monitor-ntfy
     restart: always
     environment:
-      - STATUS_URL=http://streammonitor:8000/
-      # NTFY_URL / WEBHOOK_URL here are just bootstrap defaults - whatever
-      # you save in the dashboard's Notifications panel takes precedence.
-      # - NTFY_URL=https://ntfy.sh/your-unguessable-topic-name
-      # - WEBHOOK_URL=https://example.com/hook
+      <<: *notify-env
+      STATUS_URL: http://streammonitor:8000/
     volumes:
       - ./config:/app/config:ro
       - streammonitor_monitor_state:/var/lib/streammonitor-monitor

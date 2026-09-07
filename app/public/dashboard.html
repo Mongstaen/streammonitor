@@ -83,7 +83,9 @@
     margin-bottom: 1rem;
   }
   label span { display: block; margin-bottom: 0.35rem; color: var(--text); }
-  input[type="url"] {
+  label span em { color: var(--muted); font-style: normal; font-size: 0.8rem; }
+  label span code { font-size: 0.85em; }
+  input, select {
     width: 100%;
     padding: 0.55rem 0.65rem;
     background: #10131a;
@@ -91,8 +93,22 @@
     border-radius: 6px;
     color: var(--text);
     font-size: 0.9rem;
+    font-family: inherit;
   }
-  input[type="url"]:focus { outline: none; border-color: var(--accent); }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  input::placeholder { color: #5c6474; }
+  h3 {
+    font-size: 0.9rem;
+    margin: 1.6rem 0 0.9rem;
+    padding-top: 1.2rem;
+    border-top: 1px solid var(--border);
+  }
+  .row { display: flex; gap: 0.8rem; }
+  .row > label { flex: 1; }
+  .row > label.narrow { flex: 0 0 9rem; }
+  @media (max-width: 520px) {
+    .row { display: block; }
+  }
   .actions { display: flex; gap: 0.6rem; margin-top: 0.4rem; }
   button {
     background: var(--accent);
@@ -122,8 +138,11 @@
     <h2>Notifications</h2>
     <p class="hint">
       Alerts fire when a stream goes silent or offline, and again on recovery.
-      Leave a field blank and Save to disable that channel. Changes apply on
-      the monitor's next poll (see <code>POLL_INTERVAL</code>).
+      Leave a field blank (or set Email's provider to Off) and Save to disable
+      that channel. Changes apply on the monitor's next poll (see
+      <code>POLL_INTERVAL</code>). Anything already set in the environment
+      shows up as a greyed-out placeholder here and stays in force unless you
+      type over it.
     </p>
     <label>
       <span>ntfy topic URL</span>
@@ -133,6 +152,68 @@
       <span>Webhook URL</span>
       <input id="webhookUrl" type="url" placeholder="https://example.com/hook (JSON body, Slack/Discord/Mattermost-style)">
     </label>
+
+    <h3>Email</h3>
+    <label>
+      <span>Provider</span>
+      <select id="emailProvider">
+        <option value="off">Off</option>
+        <option value="resend">Resend (HTTP API)</option>
+        <option value="smtp">SMTP server</option>
+      </select>
+    </label>
+    <div id="emailCommon" hidden>
+      <div class="row">
+        <label>
+          <span>From</span>
+          <input id="emailFrom" type="text" placeholder="alerts@example.com">
+        </label>
+        <label>
+          <span>Display name <em>&mdash; optional</em></span>
+          <input id="emailFromName" type="text" placeholder="Streammonitor Alerts">
+        </label>
+      </div>
+      <label>
+        <span>To <em>&mdash; several, separated by <code>;</code> or <code>,</code></em></span>
+        <input id="emailTo" type="text" placeholder="ops@example.com; oncall@example.com">
+      </label>
+    </div>
+    <div id="emailResend" hidden>
+      <label>
+        <span>Resend API key</span>
+        <input id="resendApiKey" type="password" autocomplete="new-password" placeholder="re_...">
+      </label>
+    </div>
+    <div id="emailSmtp" hidden>
+      <div class="row">
+        <label>
+          <span>SMTP host</span>
+          <input id="smtpHost" type="text" placeholder="smtp.example.com">
+        </label>
+        <label class="narrow">
+          <span>Port</span>
+          <input id="smtpPort" type="number" min="1" max="65535" placeholder="587">
+        </label>
+      </div>
+      <label>
+        <span>Encryption</span>
+        <select id="smtpSecure">
+          <option value="">Auto (implicit TLS on port 465, else STARTTLS)</option>
+          <option value="true">Implicit TLS (SMTPS)</option>
+          <option value="false">STARTTLS if offered, else plaintext</option>
+        </select>
+      </label>
+      <div class="row">
+        <label>
+          <span>Username</span>
+          <input id="smtpUser" type="text" placeholder="blank if the relay needs no auth">
+        </label>
+        <label>
+          <span>Password</span>
+          <input id="smtpPass" type="password" autocomplete="new-password" placeholder="">
+        </label>
+      </div>
+    </div>
     <div class="actions">
       <button id="saveBtn">Save</button>
       <button id="testBtn" class="secondary">Save &amp; send test</button>
@@ -198,27 +279,102 @@
     }
   }
 
+  const el = (id) => document.getElementById(id);
+
+  // Which email inputs are relevant depends on the provider
+  function syncEmailFields() {
+    const value = el("emailProvider").value;
+    const provider = value === "off" ? "" : value;
+    el("emailCommon").hidden = !provider;
+    el("emailResend").hidden = provider !== "resend";
+    el("emailSmtp").hidden = provider !== "smtp";
+  }
+
+  // A field the environment supplies is left empty but advertised as a
+  // placeholder, so it's clear the channel is configured without us echoing
+  // the value (or, for secrets, ever sending it to the browser).
+  function applyEnvPlaceholder(id, envValue, bare) {
+    if (envValue) {
+      el(id).placeholder = bare ? envValue : `${envValue} (from environment)`;
+    }
+  }
+
   async function loadSettings() {
     try {
       const res = await fetch("/api/settings");
       const settings = await res.json();
-      document.getElementById("ntfyUrl").value = settings.ntfyUrl || "";
-      document.getElementById("webhookUrl").value = settings.webhookUrl || "";
+      const email = settings.email || {};
+      const env = settings.envDefaults || {};
+      const envEmail = env.email || {};
+
+      el("ntfyUrl").value = settings.ntfyUrl || "";
+      el("webhookUrl").value = settings.webhookUrl || "";
+      applyEnvPlaceholder("ntfyUrl", env.ntfyUrl);
+      applyEnvPlaceholder("webhookUrl", env.webhookUrl);
+
+      el("emailProvider").value = email.provider || envEmail.provider || "off";
+      el("emailFrom").value = email.from || "";
+      el("emailFromName").value = email.fromName || "";
+      el("emailTo").value = Array.isArray(email.to)
+        ? email.to.join("; ")
+        : email.to || "";
+      el("smtpHost").value = email.smtpHost || "";
+      el("smtpPort").value = email.smtpPort || "";
+      el("smtpUser").value = email.smtpUser || "";
+      // Never repopulate secrets - the server only tells us whether it has one
+      el("resendApiKey").value = "";
+      el("smtpPass").value = "";
+      el("smtpSecure").value =
+        email.smtpSecure === "" || email.smtpSecure === undefined ? "" : String(email.smtpSecure);
+
+      applyEnvPlaceholder("emailFrom", envEmail.from);
+      applyEnvPlaceholder("emailFromName", envEmail.fromName);
+      applyEnvPlaceholder("emailTo", envEmail.to);
+      applyEnvPlaceholder("smtpHost", envEmail.smtpHost);
+      applyEnvPlaceholder("smtpPort", envEmail.smtpPort, true);
+      applyEnvPlaceholder("smtpUser", envEmail.smtpUser);
+      el("resendApiKey").placeholder = email.hasResendApiKey
+        ? "saved - leave blank to keep it"
+        : envEmail.hasResendApiKey
+        ? "set via RESEND_API_KEY"
+        : "re_...";
+      el("smtpPass").placeholder = email.hasSmtpPass
+        ? "saved - leave blank to keep it"
+        : envEmail.hasSmtpPass
+        ? "set via SMTP_PASS"
+        : "";
+
+      if (env.smtpAvailable === false) {
+        el("smtpHost").placeholder = "SMTP unavailable - rebuild the image";
+      }
+      syncEmailFields();
     } catch (err) {
       setStatus(`Failed to load settings: ${err.message}`, true);
     }
   }
 
   function setStatus(msg, isErr) {
-    const el = document.getElementById("settingsStatus");
-    el.textContent = msg;
-    el.className = "status-msg " + (isErr ? "err" : "ok");
+    const target = document.getElementById("settingsStatus");
+    target.textContent = msg;
+    target.className = "status-msg " + (isErr ? "err" : "ok");
   }
 
   async function saveSettings() {
     const body = {
-      ntfyUrl: document.getElementById("ntfyUrl").value.trim(),
-      webhookUrl: document.getElementById("webhookUrl").value.trim(),
+      ntfyUrl: el("ntfyUrl").value.trim(),
+      webhookUrl: el("webhookUrl").value.trim(),
+      email: {
+        provider: el("emailProvider").value,
+        from: el("emailFrom").value.trim(),
+        fromName: el("emailFromName").value.trim(),
+        to: el("emailTo").value.trim(),
+        resendApiKey: el("resendApiKey").value,
+        smtpHost: el("smtpHost").value.trim(),
+        smtpPort: el("smtpPort").value.trim(),
+        smtpSecure: el("smtpSecure").value,
+        smtpUser: el("smtpUser").value.trim(),
+        smtpPass: el("smtpPass").value,
+      },
     };
     const res = await fetch("/api/settings", {
       method: "POST",
@@ -230,16 +386,19 @@
     return data;
   }
 
-  document.getElementById("saveBtn").addEventListener("click", async () => {
+  el("emailProvider").addEventListener("change", syncEmailFields);
+
+  el("saveBtn").addEventListener("click", async () => {
     try {
       await saveSettings();
       setStatus("Saved.", false);
+      await loadSettings();
     } catch (err) {
       setStatus(err.message, true);
     }
   });
 
-  document.getElementById("testBtn").addEventListener("click", async (e) => {
+  el("testBtn").addEventListener("click", async (e) => {
     const btn = e.currentTarget;
     btn.disabled = true;
     try {
@@ -252,6 +411,7 @@
       );
       const anyFailed = Object.values(data).some((v) => !v.ok);
       setStatus(parts.join(", "), anyFailed);
+      await loadSettings();
     } catch (err) {
       setStatus(err.message, true);
     } finally {

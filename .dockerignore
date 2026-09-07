@@ -1,0 +1,8 @@
+# Trims the build context. node_modules matters most: the Dockerfile does
+# `ADD app /app` before `npm install`, so a tree built on the host would be
+# copied straight over the image's own - wrong platform binaries included.
+.git
+.github
+.env
+**/node_modules
+**/__pycache__

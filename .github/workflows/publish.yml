@@ -1,0 +1,187 @@
+# Builds both images and publishes them to GHCR.
+#
+# Pull requests build but never push, so a fork PR can't publish anything.
+# Pushes to main publish :main and :latest; a v* tag publishes the semver
+# tags. Every build also gets an immutable :sha-<commit> tag, which is what
+# docker-compose should pin to if you want reproducible deploys.
+name: Publish images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# One run per ref. Superseded PR runs are pointless, but let pushes to main
+# finish so a published tag never comes from a half-cancelled build.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # Cheap syntax gate. Neither image runs its code at build time, so a
+  # CoffeeScript typo would otherwise sail into a published tag and only
+  # surface when the container crash-loops.
+  verify:
+    name: Verify sources
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Compile CoffeeScript
+        working-directory: app
+        run: npx coffee -c -p app.coffee > /dev/null
+
+      - name: Parse dashboard script
+        working-directory: app
+        run: |
+          node -e '
+            const fs = require("fs");
+            const html = fs.readFileSync("public/dashboard.html", "utf8");
+            const blocks = html.match(/<script>([\s\S]*?)<\/script>/g) || [];
+            if (!blocks.length) throw new Error("no script block found");
+            for (const block of blocks) {
+              new Function(block.replace(/^<script>/, "").replace(/<\/script>$/, ""));
+            }
+            console.log(`${blocks.length} script block(s) parse OK`);
+          '
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Compile monitor
+        run: python -m py_compile monitor-ntfy/monitor_ntfy.py
+
+      - name: Check entrypoint shell syntax
+        run: sh -n monitor-ntfy/entrypoint.sh
+
+      - name: Validate example stream config
+        run: |
+          pip install --quiet pyyaml
+          python -c '
+          import sys, yaml
+          config = yaml.safe_load(open("config/streams.example.yml"))
+          streams = (config or {}).get("streams")
+          if not streams:
+              sys.exit("streams.example.yml must define a non-empty top-level streams list")
+          for stream in streams:
+              if not (stream.get("name") and stream.get("url")):
+                  sys.exit(f"invalid entry: {stream!r}")
+          print(f"{len(streams)} example stream(s) OK")
+          '
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # Both needed by attest-build-provenance below.
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The app Dockerfile does `ADD app /app`, so its context is the
+          # repo root, not app/.
+          - name: streammonitor
+            context: .
+            dockerfile: Dockerfile
+            suffix: ""
+          - name: streammonitor-monitor
+            context: ./monitor-ntfy
+            dockerfile: ./monitor-ntfy/Dockerfile
+            suffix: "-monitor"
+    steps:
+      - uses: actions/checkout@v4
+
+      # arm64 is emulated, which is slow but means the images run on a Pi or
+      # an Ampere box without a second pipeline.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # metadata-action lowercases the image name, which GHCR requires and
+      # the repository owner ("Mongstaen") is not.
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}${{ matrix.suffix }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.name }}
+            org.opencontainers.image.licenses=AGPL-3.0
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Per-image cache scope, or the two builds would evict each other.
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          provenance: ${{ github.event_name != 'pull_request' }}
+          sbom: ${{ github.event_name != 'pull_request' }}
+
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ github.repository }}${{ matrix.suffix }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        run: |
+          {
+            echo "### ${{ matrix.name }}"
+            echo
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "Built for linux/amd64 and linux/arm64. Not pushed (pull request)."
+            else
+              echo "Digest: \`${{ steps.build.outputs.digest }}\`"
+              echo
+              echo "Tags:"
+              echo '${{ steps.meta.outputs.tags }}' | sed 's/^/- `/; s/$/`/'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
